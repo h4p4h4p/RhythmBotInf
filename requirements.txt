@@ -1,0 +1,6 @@
+mss
+pydirectinput
+keyboard
+pystray
+Pillow
+pynput
