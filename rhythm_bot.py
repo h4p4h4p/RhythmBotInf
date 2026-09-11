@@ -1,31 +1,29 @@
 # rhythm_bot.py - generic rhythm-game autoplayer (pure pixel detection).
 #
-# No chart/JSON reading. Each lane has ONE probe pixel sitting just ABOVE the
-# hit point (the note travels downward and is WHITE). While the probe reads a
-# white pixel the key is down (holding the note), and when the pixel goes
-# BLACK the key is released. Nothing needs the scroll direction or note data -
-# white arrow reaches the probe -> press, black background -> release.
-#
-# SYSTEM TRAY
-#   Green icon = playing, grey = idle. Left-click = Start/Pause.
-#   Right-click: Start/Pause, Probe (Above/Below), probe overlay,
-#                Calibrate, threshold +/-, Quit.
+# No chart/JSON reading. Each lane watches a THIN strip of probes sitting just
+# above the hit point. While the strip sees WHITE the key is down (holding the
+# note), and when it goes fully BLACK the key is released. The strip stays thin
+# so dense streams/jacks show black gaps and every note gets its own press.
+# Nothing needs the scroll direction or note data.
 #
 # CALIBRATION - do this once per game/resolution
-#   Click "Calibrate" (or press 'c'). An overlay shows colored markers for
-#   each lane (letters D F J K). Left-click each one to place it exactly on
-#   the receptors - it jumps to where you click. Right-click = undo.
-#   Saved to rhythm_bot.cfg automatically.
+#   Press 'c'. An overlay shows colored markers for each lane (D F J K).
+#   Left-click each one to place it exactly on the receptors.
+#   Right-click = undo. Saved to rhythm_bot.cfg automatically.
 #
-# CONSOLE CONTROLS (python launch):
-#   c           calibrate           s/Enter   start (3s countdown)
-#   p / Space   pause/resume        q         quit
-#   o           probe above/below   v         toggle probe overlay
-#   [ ]         white threshold     - =       press delay ms
-#   z x         probe distance      F9        global start/pause
+# CONSOLE CONTROLS:
+#   Enter   start          p / Space   pause/resume
+#   c       calibrate      q           quit
 #
-#   Run:  python rhythm_bot.py  |  pythonw rhythm_bot.py  (tray only)
-#         --start | --probe below | --selftest
+# GLOBAL KEYS (fire anywhere, even while playing):
+#   F9      start/pause    [ ]         white threshold
+#   - =     press delay    z x         probe distance
+#   r       random jitter  o           probe above/below
+#   v       probe overlay
+#
+# A white keybind cheat-sheet is shown at the bottom of the screen while running.
+#
+#   Run:  python rhythm_bot.py  |  --start | --probe below | --selftest
 #
 # Tip: run the game windowed/borderless so the desktop is capturable.
 
@@ -50,28 +48,19 @@ except Exception:
 try:
     import mss
 except ImportError:
-    sys.exit("Missing dependency: pip install mss pydirectinput pystray pillow pynput")
+    sys.exit("Missing dependency: pip install mss pydirectinput")
 
 try:
     import pydirectinput
     pydirectinput.PAUSE = 0.0
 except ImportError:
-    sys.exit("Missing dependency: pip install mss pydirectinput pystray pillow pynput")
+    sys.exit("Missing dependency: pip install mss pydirectinput")
 
 try:
     import keyboard
     HAS_GLOBAL = True
 except Exception:
     HAS_GLOBAL = False
-
-try:
-    import pystray
-    HAS_TRAY = True
-except Exception:
-    HAS_TRAY = False
-
-if HAS_TRAY:
-    from PIL import Image, ImageDraw
 
 try:
     from pynput import mouse as _pynput_mouse
@@ -105,6 +94,13 @@ PROBE_LEN = 3     # probes per strip
 
 KEYMAP = {b"H": "up", b"P": "down", b"K": "left", b"M": "right",
           b"\r": "enter", b"\x08": "backspace", b"\x1b": "esc"}
+
+# Keybind cheat-sheet shown at the bottom of the screen while the bot runs.
+HELP_TEXT = "\n".join([
+    "ENTER  start       p/space  pause       c  calibrate      q  quit",
+    "[ ]  threshold      - =  delay      z x  probe dist     r  jitter",
+    "o  probe side      v  overlay      F9  start/pause anywhere",
+])
 
 
 def out(*args, **kwargs):
@@ -147,16 +143,6 @@ def median(vals):
     return sorted(vals)[len(vals) // 2]
 
 
-def make_image(on):
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    body = (76, 175, 80, 255) if on else (125, 125, 125, 255)
-    d.ellipse((3, 3, 60, 60), fill=body)
-    d.polygon([(32, 11), (45, 30), (38, 30), (38, 49), (26, 49), (26, 30), (19, 30)],
-              fill=(255, 255, 255, 255))
-    return img
-
-
 # --------------------------------------------------------------------------
 #  On-screen overlay (transparent, click-through, always-on-top), pure Win32.
 # --------------------------------------------------------------------------
@@ -167,6 +153,11 @@ class SIZE(ctypes.Structure):
 
 class PNT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -211,6 +202,11 @@ AC_SRC_ALPHA = 1
 ULW_ALPHA = 2
 BI_RGB = 0
 DIB_RGB_COLORS = 0
+OPAQUE = 1
+DT_TOP = 0
+DT_LEFT = 0
+DT_NOCLIP = 0x100
+DT_CALCRECT = 0x400
 
 GLYPHS = {
     "D": ["11110", "10001", "10001", "10001", "10001", "10001", "11110"],
@@ -221,13 +217,14 @@ GLYPHS = {
 
 
 class Overlay:
-    def __init__(self, w, h):
+    def __init__(self, w, h, x=0, y=0):
         self.w, self.h = w, h
+        self.x, self.y = x, y
         self.pix = None
-        self._make_window(w, h)
+        self._make_window(w, h, x, y)
         self._make_dib(w, h)
 
-    def _make_window(self, w, h):
+    def _make_window(self, w, h, x, y):
         user32 = ctypes.windll.user32
         LPARAM = ctypes.c_ssize_t if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long
         user32.DefWindowProcW.restype = LRESULT
@@ -246,7 +243,7 @@ class Overlay:
         self.hwnd = user32.CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
             "RhythmBotOv", "rhythm_bot", WS_POPUP,
-            0, 0, w, h, None, None, hInst, None)
+            x, y, w, h, None, None, hInst, None)
 
     @staticmethod
     def _wndproc(hwnd, msg, wp, lp):
@@ -302,6 +299,49 @@ class Overlay:
                         for dx in range(scale):
                             self._px(x0 + c * scale + dx, y0 + r * scale + dy,
                                      rgb[0], rgb[1], rgb[2], alpha)
+
+    @staticmethod
+    def measure_text(text, fontname="Segoe UI", fontsize=14):
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+        hdc = user32.GetDC(None)
+        font = gdi32.CreateFontW(fontsize, 0, 0, 0, 400, 0, 0, 0,
+                                 1, 0, 0, 5, 0, fontname)
+        old = gdi32.SelectObject(hdc, font)
+        user32.DrawTextW.argtypes = [wintypes.HDC, ctypes.c_wchar_p, ctypes.c_int,
+                                     ctypes.POINTER(RECT), wintypes.UINT]
+        rc = RECT(0, 0, 0, 0)
+        user32.DrawTextW(hdc, text, -1, ctypes.byref(rc), DT_CALCRECT | DT_NOCLIP)
+        gdi32.SelectObject(hdc, old)
+        gdi32.DeleteObject(font)
+        user32.ReleaseDC(None, hdc)
+        return rc.right, rc.bottom
+
+    def draw_text_help(self, text, fontname="Segoe UI", fontsize=14):
+        # white text on black, then black becomes transparent so only the
+        # (anti-aliased) white lettering is visible on the layered window
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+        font = gdi32.CreateFontW(fontsize, 0, 0, 0, 400, 0, 0, 0,
+                                 1, 0, 0, 5, 0, fontname)
+        gdi32.SelectObject(self.hdcMem, font)
+        gdi32.SetBkMode.argtypes = [wintypes.HDC, ctypes.c_int]
+        gdi32.SetBkColor.argtypes = [wintypes.HDC, wintypes.COLORREF]
+        gdi32.SetTextColor.argtypes = [wintypes.HDC, wintypes.COLORREF]
+        user32.DrawTextW.argtypes = [wintypes.HDC, ctypes.c_wchar_p, ctypes.c_int,
+                                     ctypes.POINTER(RECT), wintypes.UINT]
+        gdi32.SetBkMode(self.hdcMem, OPAQUE)
+        gdi32.SetBkColor(self.hdcMem, 0)                    # black background
+        gdi32.SetTextColor(self.hdcMem, 0x00FFFFFF)         # white text
+        rc = RECT(0, 0, wintypes.LONG(self.w), wintypes.LONG(self.h))
+        user32.DrawTextW(self.hdcMem, text, -1, ctypes.byref(rc),
+                         DT_TOP | DT_LEFT | DT_NOCLIP)
+        gdi32.DeleteObject(font)
+        pix = self.pix
+        for i in range(0, self.w * self.h * 4, 4):
+            a = max(pix[i], pix[i + 1], pix[i + 2])         # white-on-black glow
+            pix[i] = pix[i + 1] = pix[i + 2] = 255
+            pix[i + 3] = a
 
     def clear(self):
         ctypes.memset(ctypes.addressof(self.pix), 0, len(self.pix))
@@ -363,12 +403,22 @@ class Bot:
         self.enabled = False
         self.quit = False
         self.lock = threading.Lock()
-        self.cmd_q = queue.Queue()
         self.mouse_q = queue.Queue()
-        self.icon = None
+        self.cmd_q = queue.Queue()
         self.cal_idx = -1
         self.overlay_visible = False
         self.overlay = None
+        self.help_ov = None
+        try:
+            hw, hh = Overlay.measure_text(HELP_TEXT, fontsize=14)
+            pad = 8
+            self.help_ov = Overlay(hw + pad * 2, hh + pad * 2,
+                                   (self.w - (hw + pad * 2)) // 2,
+                                   self.h - hh - pad * 2 - 60)
+            log("help overlay ready")
+        except Exception as e:
+            self.help_ov = None
+            log("help overlay failed: %r" % e)
         self._last_hud = 0.0
         self._last_overlay = 0.0
         self._black_warned = False
@@ -399,7 +449,6 @@ class Bot:
                         # legacy key kept so old configs still load (0 = TOP)
                         self.axis = int(parts[1]) % 2
                     elif parts[0] == "probe" and len(parts) == 2:
-                        self.probe_dist = max(4, int(parts[1]))
                         self.probe_dist = max(4, int(parts[1]))
                     elif parts[0] == "threshold" and len(parts) == 2:
                         self.threshold = int(parts[1])
@@ -537,7 +586,6 @@ class Bot:
             self.enabled = on
         if was_off:
             self.release_all()
-        self.refresh_icon()
         log("enabled=%s" % ("ON" if on else "OFF"))
 
     def toggle(self):
@@ -546,24 +594,34 @@ class Bot:
             was_off = not self.enabled
         if was_off:
             self.release_all()
-        self.refresh_icon()
         out("status:", "ON" if self.enabled else "OFF")
         return self.enabled
 
-    # ---- tray -------------------------------------------------------------
+    def adjust_threshold(self, d):
+        self.threshold = min(400, max(10, self.threshold + d))
+        out("threshold =", self.threshold)
 
-    def attach_tray(self, icon):
-        self.icon = icon
+    def adjust_delay(self, d):
+        self.delay_ms = min(2000, max(-100, self.delay_ms + d))
+        out("delay =", self.delay_ms, "ms")
 
-    def refresh_icon(self):
-        if not HAS_TRAY or self.icon is None:
-            return
-        try:
-            self.icon.icon = make_image(self.enabled)
-            self.icon.title = ("Rhythm Bot - PLAYING (D F J K)"
-                               if self.enabled else "Rhythm Bot - idle")
-        except Exception:
-            pass
+    def adjust_probe(self, d):
+        self.probe_dist = min(400, max(4, self.probe_dist + d))
+        out("probe dist =", self.probe_dist)
+        self.show_overlay(self.overlay_visible)
+
+    def toggle_random(self):
+        self.randomize = not self.randomize
+        out("random jitter", "ON" if self.randomize else "OFF")
+
+    def toggle_axis(self):
+        self.axis = (self.axis + 1) % len(SIDES)
+        out("probe ->", SIDES[self.axis][0])
+        self.show_overlay(self.overlay_visible)
+
+    def toggle_overlay_view(self):
+        self.show_overlay(not self.overlay_visible)
+        out("probe overlay", "ON" if self.overlay_visible else "OFF")
 
     # ---- detection --------------------------------------------------------
 
@@ -647,6 +705,9 @@ class Bot:
         self.set_enabled(False)
         self.cal_idx = 0
         self.show_overlay(True)
+        if self.help_ov:                        # keybind cheat-sheet during calibration
+            self.help_ov.draw_text_help(HELP_TEXT, fontsize=14)
+            self.help_ov.commit()
         out("CLICK each marker. Left-click = set, right-click = undo (%d total)."
             % len(self.lanes))
         log("calibration started")
@@ -654,6 +715,8 @@ class Bot:
     def finish_calibrate(self):
         self.cal_idx = -1
         self.show_overlay(self.overlay_visible)
+        if self.help_ov:
+            self.help_ov.hide()
         self.save_cfg()
         out("Calibration saved. Markers show the hit points.")
         log("calibration saved")
@@ -681,6 +744,16 @@ class Bot:
             pass
 
     # ---- overlay ----------------------------------------------------------
+
+    def handle_cmds(self):
+        # global hotkeys only ENQUEUE work; everything runs on the bot thread
+        # here so GDI/overlay calls never race the main render loop
+        try:
+            while True:
+                fn = self.cmd_q.get_nowait()
+                fn()
+        except queue.Empty:
+            pass
 
     def show_overlay(self, visible):
         self.overlay_visible = visible
@@ -757,86 +830,18 @@ class Bot:
             return
         if k == "c":
             self.begin_calibrate()
-        elif k in ("s", "enter"):
-            self.start_countdown()
+        elif k == "enter":
+            self.start()
         elif k in ("p", " "):
             self.toggle()
         elif k == "q":
             self.quit = True
-        elif k == "o":
-            self.axis = (self.axis + 1) % len(SIDES)
-            out("probe ->", SIDES[self.axis][0])
-            self.show_overlay(self.overlay_visible)
-        elif k == "v":
-            self.show_overlay(not self.overlay_visible)
-            out("probe overlay", "ON" if self.overlay_visible else "OFF")
-        elif k == "[":
-            self.threshold = max(10, self.threshold - 10)
-            out("threshold =", self.threshold)
-        elif k == "]":
-            self.threshold = min(400, self.threshold + 10)
-            out("threshold =", self.threshold)
-        elif k == "-":
-            self.delay_ms = max(-100, self.delay_ms - 10)
-            out("delay =", self.delay_ms, "ms")
-        elif k == "=":
-            self.delay_ms = min(2000, self.delay_ms + 10)
-            out("delay =", self.delay_ms, "ms")
-        elif k == "r":
-            self.randomize = not self.randomize
-            out("random jitter", "ON" if self.randomize else "OFF")
-        elif k == "z":
-            self.probe_dist = max(4, self.probe_dist - 5)
-            out("probe dist =", self.probe_dist)
-            self.show_overlay(self.overlay_visible)
-        elif k == "x":
-            self.probe_dist = min(400, self.probe_dist + 5)
-            out("probe dist =", self.probe_dist)
-            self.show_overlay(self.overlay_visible)
 
-    # ---- tray commands ----------------------------------------------------
-
-    def cmd_put(self, cmd):
-        self.cmd_q.put(cmd)
-
-    def drain_commands(self):
-        try:
-            while True:
-                cmd = self.cmd_q.get_nowait()
-                if cmd == "toggle":
-                    self.toggle()
-                elif cmd == "start":
-                    self.start_countdown()
-                elif cmd == "calibrate":
-                    self.begin_calibrate()
-                elif cmd == "overlay":
-                    self.show_overlay(not self.overlay_visible)
-                    out("probe overlay", "ON" if self.overlay_visible else "OFF")
-                elif cmd == "axis":
-                    self.axis = (self.axis + 1) % len(SIDES)
-                    out("probe ->", SIDES[self.axis][0])
-                    self.show_overlay(self.overlay_visible)
-                elif cmd == "th+":
-                    self.threshold = min(400, self.threshold + 10)
-                    out("threshold =", self.threshold)
-                elif cmd == "th-":
-                    self.threshold = max(10, self.threshold - 10)
-                    out("threshold =", self.threshold)
-                elif cmd == "quit":
-                    self.quit = True
-        except queue.Empty:
-            pass
-
-    def start_countdown(self):
+    def start(self):
         self.set_enabled(False)
-        out("Starting in 3s - tray turns GREEN. Switch to the game now.")
-        log("countdown")
-        for i in (3, 2, 1):
-            out(" ", i)
-            time.sleep(1)
         self.init_baselines()
         self.set_enabled(True)
-        out("\nGO - F9/p/Space pauses. Markers flash green as notes hit.")
+        out("GO - F9/p/Space pauses. Markers flash green as notes hit.")
 
     # ---- HUD --------------------------------------------------------------
 
@@ -859,7 +864,7 @@ class Bot:
         last_ov = 0.0
         try:
             while not self.quit:
-                self.drain_commands()
+                self.handle_cmds()
                 self.handle_mouse_events()
                 if has_console():
                     self.handle_console()
@@ -878,35 +883,13 @@ class Bot:
         except Exception:
             self.quit = True
             log("FATAL in bot loop:\n" + traceback.format_exc())
-            if self.icon is not None:
-                try:
-                    self.icon.stop()
-                except Exception:
-                    pass
         finally:
             self.set_enabled(False)
             if self.overlay:
                 self.overlay.hide()
+            if self.help_ov:
+                self.help_ov.hide()
             self.save_cfg()
-
-
-def build_menu(app):
-    if not HAS_TRAY:
-        return None
-    return pystray.Menu(
-        pystray.MenuItem(lambda item: "Pause" if app.enabled else "Start",
-                         lambda i, it: app.cmd_put("toggle"), default=True),
-        pystray.MenuItem("Calibrate (click markers)...",
-                         lambda i, it: app.cmd_put("calibrate")),
-        pystray.MenuItem(lambda item: "Probe: " + SIDES[app.axis][0],
-                         lambda i, it: app.cmd_put("axis")),
-        pystray.MenuItem(lambda item: "Probe overlay: %s" % ("ON" if app.overlay_visible else "OFF"),
-                         lambda i, it: app.cmd_put("overlay")),
-        pystray.MenuItem("Threshold +10", lambda i, it: app.cmd_put("th+")),
-        pystray.MenuItem("Threshold -10", lambda i, it: app.cmd_put("th-")),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Quit", lambda i, it: app.cmd_put("quit")),
-    )
 
 
 def parse_args(app):
@@ -926,6 +909,8 @@ def selftest():
     time.sleep(3)
     if app.overlay:
         app.overlay.hide()
+    if app.help_ov:
+        app.help_ov.hide()
     px = app.sample_px(app.lanes[0]["x"], app.lanes[0]["y"])
     out("pixel sample at first hit point:", px, " OK")
     out("self-test passed")
@@ -957,22 +942,42 @@ def main():
     parse_args(app)
 
     out("=" * 66)
-    out("  RHYTHM BOT - green tray = playing, grey = idle.")
-    out("  Detection: a THIN strip of probes just above each hit point holds")
-    out("  while white and releases on black - spam gaps stay visible so every")
-    out("  note in a stream gets its own press. Single grab keeps up with 120fps.")
-    out("  First time: tray -> Calibrate, then CLICK each of the 4 markers.")
-    out("  console: c=calibrate  s/Enter=start  p/Space=pause  o=probe above/below  q=quit")
-    out("            r=random jitter ON/OFF  v=overlay  [ ] white-threshold  - = delay ms")
-    out("            z x probe distance   F9 = global start/pause")
+    out("  RHYTHM BOT")
+    out("-" * 66)
+    out("  START / PAUSE   ENTER  (type it here)   or   F9 (anywhere)")
+    out("  CALIBRATE        C       QUIT          Q")
+    out("-" * 66)
+    out("  GLOBAL KEYS (work even while you're in the game):")
+    out("    [ ]  white threshold      - =  press delay ms")
+    out("    z x  probe distance       r    random jitter")
+    out("    o    probe above/below    v    probe overlay")
+    out("-" * 66)
+    out("  First time: press C then CLICK each of the 4 markers (D F J K).")
     out("  Run the game windowed/borderless so the desktop is capturable.")
     out("=" * 66)
 
     if HAS_GLOBAL:
-        try:
-            keyboard.add_hotkey("f9", app.toggle)
-        except Exception:
-            pass
+        def hk(fn):
+            return lambda: app.cmd_q.put(fn)
+
+        binds = {
+            "[": lambda: hk(lambda: app.adjust_threshold(-10)),
+            "]": lambda: hk(lambda: app.adjust_threshold(10)),
+            "-": lambda: hk(lambda: app.adjust_delay(-10)),
+            "=": lambda: hk(lambda: app.adjust_delay(10)),
+            "z": lambda: hk(lambda: app.adjust_probe(-5)),
+            "x": lambda: hk(lambda: app.adjust_probe(5)),
+            "r": hk(lambda: app.toggle_random()),
+            "o": hk(lambda: app.toggle_axis()),
+            "v": hk(lambda: app.toggle_overlay_view()),
+            "f9": hk(app.toggle),
+        }
+        for key, fn in binds.items():
+            try:
+                keyboard.add_hotkey(key, fn)
+                log("hotkey %s" % key)
+            except Exception:
+                out("global key %r not bound" % key)
 
     if HAS_MOUSE:
         lst = _pynput_mouse.Listener(
@@ -986,36 +991,10 @@ def main():
     else:
         out("pynput not installed - calibration needs it:  pip install pynput")
 
-    if HAS_TRAY:
-        icon = pystray.Icon("rhythm_bot", make_image(False), "Rhythm Bot - idle",
-                            build_menu(app))
-        app.attach_tray(icon)
-        app.refresh_icon()
-        thread = threading.Thread(target=app.bot_loop, daemon=True)
-        thread.start()
-        if "--start" in sys.argv:
-            app.cmd_put("start")
-        log("tray icon up")
-        try:
-            icon.run()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            app.quit = True
-            app.set_enabled(False)
-            if HAS_GLOBAL:
-                try:
-                    keyboard.unhook_all()
-                except Exception:
-                    pass
-    else:
-        out("pystray/Pillow missing - `pip install pystray pillow` for the tray icon.")
-        if "--start" in sys.argv:
-            app.start_countdown()
-        else:
-            out("Press  c  to calibrate, or  s/Enter  to start.")
-        app.bot_loop()
-        out("\nbye")
+    if "--start" in sys.argv:
+        app.start()
+    app.bot_loop()
+    out("\nbye")
 
 
 if __name__ == "__main__":
