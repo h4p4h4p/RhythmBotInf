@@ -17,7 +17,7 @@ where py >nul 2>nul || set "PY=python"
     exit /b 1
 )
 
-echo [1/2] Installing: mss, pydirectinput, keyboard, pystray, Pillow, pynput ...
+echo [1/2] Installing: mss, pydirectinput, keyboard, pynput ...
 %PY% -m pip install --upgrade pip >nul 2>nul
 %PY% -m pip install -r "%~dp0requirements.txt"
 if errorlevel 1 (
@@ -28,7 +28,7 @@ if errorlevel 1 (
 
 echo.
 echo [2/2] Verifying packages ...
-%PY% -c "import mss, pydirectinput, keyboard, pystray, PIL, pynput; print('all packages OK')" || (
+%PY% -c "import mss, pydirectinput, keyboard, pynput; print('all packages OK')" || (
     echo [WARNING] Some packages are missing - re-run this setup.
 )
 

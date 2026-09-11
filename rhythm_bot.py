@@ -600,23 +600,28 @@ class Bot:
     def adjust_threshold(self, d):
         self.threshold = min(400, max(10, self.threshold + d))
         out("threshold =", self.threshold)
+        log("threshold=%d" % self.threshold)
 
     def adjust_delay(self, d):
         self.delay_ms = min(2000, max(-100, self.delay_ms + d))
         out("delay =", self.delay_ms, "ms")
+        log("delay=%dms" % self.delay_ms)
 
     def adjust_probe(self, d):
         self.probe_dist = min(400, max(4, self.probe_dist + d))
         out("probe dist =", self.probe_dist)
+        log("probe_dist=%d" % self.probe_dist)
         self.show_overlay(self.overlay_visible)
 
     def toggle_random(self):
         self.randomize = not self.randomize
         out("random jitter", "ON" if self.randomize else "OFF")
+        log("jitter=%s" % ("ON" if self.randomize else "OFF"))
 
     def toggle_axis(self):
         self.axis = (self.axis + 1) % len(SIDES)
         out("probe ->", SIDES[self.axis][0])
+        log("axis=%s" % SIDES[self.axis][0])
         self.show_overlay(self.overlay_visible)
 
     def toggle_overlay_view(self):
@@ -955,6 +960,14 @@ def main():
     out("  First time: press C then CLICK each of the 4 markers (D F J K).")
     out("  Run the game windowed/borderless so the desktop is capturable.")
     out("=" * 66)
+
+    try:
+        if not ctypes.windll.shell32.IsUserAnAdmin():
+            out("  NOTE: not running as admin - if the game runs elevated,")
+            out("  global keys will be ignored in-game. Use rhythm_bot.cmd")
+            out("  to auto-run as administrator.")
+    except Exception:
+        pass
 
     if HAS_GLOBAL:
         def hk(fn):
