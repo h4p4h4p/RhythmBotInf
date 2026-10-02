@@ -1,31 +1,4 @@
-# rhythm_bot.py - generic rhythm-game autoplayer (pure pixel detection).
-#
-# No chart/JSON reading. Each lane watches a THIN strip of probes sitting just
-# above the hit point. While the strip sees WHITE the key is down (holding the
-# note), and when it goes fully BLACK the key is released. The strip stays thin
-# so dense streams/jacks show black gaps and every note gets its own press.
-# Nothing needs the scroll direction or note data.
-#
-# CALIBRATION - do this once per game/resolution
-#   Press 'c'. An overlay shows colored markers for each lane (D F J K).
-#   Left-click each one to place it exactly on the receptors.
-#   Right-click = undo. Saved to rhythm_bot.cfg automatically.
-#
-# CONSOLE CONTROLS:
-#   Enter   start          p / Space   pause/resume
-#   c       calibrate      q           quit
-#
-# GLOBAL KEYS (fire anywhere, even while playing):
-#   F9      start/pause    [ ]         white threshold
-#   - =     press delay    z x         probe distance
-#   r       random jitter  o           probe above/below
-#   v       probe overlay
-#
-# A white keybind cheat-sheet is shown at the bottom of the screen while running.
-#
-#   Run:  python rhythm_bot.py  |  --start | --probe below | --selftest
-#
-# Tip: run the game windowed/borderless so the desktop is capturable.
+# WARNING! This script is really buggy, so watch out!
 
 import atexit
 import ctypes
