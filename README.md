@@ -1,9 +1,8 @@
-Use setup.bat to install deps
-
-This is a basic rhythm bot:
-
-detects whether a pixel isnt black
+Universal rhythm bot: now works on all games
 
 
+Run pip install mss pillow for deps
 
-Requires python (latest version)
+Requires Windows (sorry Linux and Mac users)
+
+Mostly self explanatory.
